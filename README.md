@@ -11,7 +11,7 @@ reverse-DNS namespace `ai.agenon`, matching the Agenon company domain.
 - Node.js 20 or newer
 - pnpm 10
 - `@elgato/cli` (installed globally: `npm install -g @elgato/cli`)
-- Stream Deck app 6.5 or newer
+- Stream Deck app 6.9 or newer (the minimum declared in each plugin's `manifest.json`)
 
 ## Getting started
 
@@ -27,6 +27,11 @@ Run the full workspace checks:
 pnpm typecheck
 pnpm test
 ```
+
+`pnpm typecheck` builds every project listed in the root `tsconfig.json`
+`references` array. Each package has two: `tsconfig.json` for its sources and
+`tsconfig.test.json` for its `*.test.ts` files, so test code is typechecked
+under the same strict settings as the code it tests.
 
 ## Running a plugin in development
 
@@ -45,7 +50,11 @@ pnpm --filter @agenon/streamdeck-k3s-context dev
    (for example `ai.agenon.<new-plugin-name>`), including the manifest,
    package name, and any references in source files.
 4. Add icons for the new plugin.
-5. Run `pnpm install` from the repository root so the new package joins the
+5. Add the new package to the `references` array in the root
+   `tsconfig.json`, both its `tsconfig.json` and its `tsconfig.test.json`.
+   A package that is not referenced there is silently skipped by
+   `pnpm typecheck`, source and tests alike.
+6. Run `pnpm install` from the repository root so the new package joins the
    workspace, then run `pnpm typecheck && pnpm test && pnpm validate`.
 
 ## Verified setup

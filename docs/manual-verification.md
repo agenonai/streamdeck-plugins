@@ -8,6 +8,8 @@ separate verification pass; see the Task 10 report in the planning
 repository for that evidence (kubeconfig service tests, build, typecheck,
 and the plugin process registering with the Stream Deck app).
 
+Section 5 is the safety check. Run it even if you skip everything else.
+
 Before you start, record your current context so you can restore it at the
 end. The context recorded during this verification run was:
 
@@ -74,31 +76,61 @@ current-context` now and use that value in step 8 instead.
 
 ## 5. Kubeconfig integrity check
 
-Read this section before running the diff below, the expected result is not
-a clean diff.
+This is the check that matters most, so read it before you run it.
 
-During Task 10's automated verification, switching contexts through a copy
-of your kubeconfig showed that the plugin's write path (via the `yaml`
-library) re-serializes the whole file on its first write. On a kubeconfig
-written by `kubectl` (sequence items flush against their parent key, for
-example `- cluster:` at the start of the line), the plugin's rewrite adds
-2-space indentation to every sequence item in the file. This happens once,
-on the very first context switch the plugin makes; after that first write,
-later switches keep reusing the newly-indented formatting. All cluster,
-user, context, and namespace data is preserved exactly, only whitespace
-changes. This means a raw `diff` against a backup will show many changed
-lines, not zero, the first time you use the plugin.
+The plugin does not re-serialise your kubeconfig. It replaces the
+`current-context` value in the file and leaves every other byte alone,
+including indentation, quoting, key order, comments and the trailing
+newline. The expected result of the diff below is therefore **one changed
+line**. A larger diff is not formatting noise to wave through, it is a bug:
+stop, restore the backup, and report it.
 
-10. Do: before doing anything else today, make a manual backup:
+10. Do: before doing anything else today, make a manual backup and record the
+    context count:
 
     ```bash
     cp ~/.kube/config ~/.kube/config.pre-streamdeck-$(date +%Y%m%d)
     kubectl config get-contexts | wc -l
     ```
 
-    (Skip this if you already have a backup from earlier today.)
+    (Skip the copy if you already have a backup from earlier today.)
 
-11. Do: after finishing steps 1 through 9 above, run:
+11. Do: after finishing steps 1 through 9 above, diff the live file against
+    that backup:
+
+    ```bash
+    diff ~/.kube/config.pre-streamdeck-$(date +%Y%m%d) ~/.kube/config
+    ```
+
+    See: exactly one changed line, the `current-context` line, like this:
+
+    ```
+    3c3
+    < current-context: agenon-vn-2
+    ---
+    > current-context: dev
+    ```
+
+    Anything else is a failure: a whitespace or indentation change, a
+    re-quoted value, a moved or dropped comment, a reordered key, a changed
+    trailing newline, or any second changed line. If you see one, restore the
+    backup and report it before using the plugin again:
+
+    ```bash
+    cp ~/.kube/config.pre-streamdeck-$(date +%Y%m%d) ~/.kube/config
+    ```
+
+12. Do: check the same thing mechanically, so a long diff cannot slip past:
+
+    ```bash
+    diff ~/.kube/config.pre-streamdeck-$(date +%Y%m%d) ~/.kube/config | grep -c '^[<>]'
+    ```
+
+    See: `2`, one `<` line and one `>` line. Any other number is a failure.
+    (If you happened to finish on the same context you started on, the count
+    is `0`; switch to a different context and run the diff again.)
+
+13. Do: confirm the set of contexts is untouched:
 
     ```bash
     diff <(kubectl config get-contexts -o name | sort) \
@@ -106,38 +138,45 @@ lines, not zero, the first time you use the plugin.
     kubectl config get-contexts | wc -l
     ```
 
-    See: the `diff` prints nothing (the same set of context names exists in
-    both files) and the line count matches what you recorded in step 10. This
-    is the check that actually matters: no context was renamed, added, or
-    deleted.
+    See: the `diff` prints nothing, and the count matches what you recorded in
+    step 10. No context was renamed, added, or deleted.
 
-12. Do (optional, stronger check): confirm you can still reach a cluster you
-    trust, for example:
+14. Do: confirm the credentials still work against a cluster you trust:
 
     ```bash
     kubectl --context agenon-vn-2 version --request-timeout=3s
     ```
 
-    See: it responds normally, proving the cluster and user credentials for
-    that context were not corrupted by the reformatting.
+    See: it responds normally, proving the cluster and user entries for that
+    context are intact.
 
-13. Do (optional): if you want to see the raw formatting change for
-    yourself:
+15. Do: confirm the plugin left no stray files beside your kubeconfig:
 
     ```bash
-    diff ~/.kube/config ~/.kube/config.pre-streamdeck-$(date +%Y%m%d) | head -20
+    ls -l ~/.kube/config*
     ```
 
-    See: many lines differ, all of them whitespace-only indentation changes
-    on `- cluster:`, `- context:`, `- name:` style list lines, plus the
-    `current-context` line. If you see any line where actual data (a
-    certificate, a server URL, a namespace, a username) differs and not just
-    leading whitespace, stop and flag it, that would be a real problem worth
-    investigating, unlike the expected reformatting above.
+    See: your `config`, the `config.pre-streamdeck-*` backup you made in step
+    10, and at most one `config.streamdeck-bak` that the plugin wrote before
+    its first write. There must be no `config.streamdeck-tmp`: a leftover
+    temp file means a write was interrupted, and `config.streamdeck-bak` is
+    then the file to restore from.
+
+    If `~/.kube/config` is a symlink (for example into a dotfiles
+    repository), confirm it is still a symlink and that the file it points at
+    is the one that changed:
+
+    ```bash
+    ls -l ~/.kube/config
+    diff ~/.kube/config.pre-streamdeck-$(date +%Y%m%d) "$(readlink -f ~/.kube/config)"
+    ```
+
+    See: `ls -l` still shows the `->` arrow, and the diff shows the same
+    single `current-context` line as step 11.
 
 ## 6. Restore
 
-14. Do: restore your original context:
+16. Do: restore your original context:
 
     ```bash
     kubectl config use-context agenon-vn-2
@@ -146,5 +185,5 @@ lines, not zero, the first time you use the plugin.
     (Replace `agenon-vn-2` with whatever `kubectl config current-context`
     reported before you started, if different.)
 
-15. Do: remove the test keys from your Stream Deck profile if you do not
+17. Do: remove the test keys from your Stream Deck profile if you do not
     want to keep them (drag them off, or right-click and remove).
