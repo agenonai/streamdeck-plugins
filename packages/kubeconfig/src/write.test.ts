@@ -75,4 +75,18 @@ describe("writeCurrentContext", () => {
 		await writeCurrentContext(path, "dev");
 		expect(existsSync(`${path}.streamdeck-tmp`)).toBe(false);
 	});
+
+	it("removes stale 0644 temp file and keeps kubeconfig at 0600", async () => {
+		const tmp = `${path}.streamdeck-tmp`;
+		await writeFile(tmp, "stale content", { mode: 0o644 });
+		await chmod(tmp, 0o644);
+		await writeCurrentContext(path, "dev");
+		expect((await stat(path)).mode & 0o777).toBe(0o600);
+		expect(await readFile(path, "utf8")).toBe(ORIGINAL.replace("current-context: agenon-vn-2", "current-context: dev"));
+	});
+
+	it("preserves backup file mode from original kubeconfig", async () => {
+		await writeCurrentContext(path, "dev");
+		expect((await stat(`${path}.streamdeck-bak`)).mode & 0o777).toBe(0o600);
+	});
 });

@@ -1,4 +1,4 @@
-import { copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { parseKubeconfig } from "./parse.js";
 
 export type WriteOptions = {
@@ -10,6 +10,7 @@ export type WriteOptions = {
  * Sets current-context to name, preserving every other byte of the file.
  * The new content is written to a sibling temp file and renamed over the
  * original, so an interrupted write cannot truncate the kubeconfig.
+ * If the context is already active, this is a no-op.
  */
 export async function writeCurrentContext(path: string, name: string, opts: WriteOptions = {}): Promise<void> {
 	const text = await readFile(path, "utf8");
@@ -33,6 +34,12 @@ export async function writeCurrentContext(path: string, name: string, opts: Writ
 
 	const mode = (await stat(path)).mode & 0o777;
 	const tmp = `${path}.streamdeck-tmp`;
-	await writeFile(tmp, doc.toString({ lineWidth: 0 }), { mode });
+	try {
+		await unlink(tmp);
+	} catch {
+		// temp file does not exist, that's fine
+	}
+	await writeFile(tmp, doc.toString({ lineWidth: 0 }));
+	await chmod(tmp, mode);
 	await rename(tmp, path);
 }
