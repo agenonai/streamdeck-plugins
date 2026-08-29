@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+plugins/*/*.sdPlugin/bin/
+plugins/*/*.sdPlugin/logs/
+*.streamDeckPlugin
+.DS_Store
