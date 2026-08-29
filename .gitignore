@@ -3,5 +3,6 @@ dist/
 *.tsbuildinfo
 plugins/*/*.sdPlugin/bin/
 plugins/*/*.sdPlugin/logs/
+logs/
 *.streamDeckPlugin
 .DS_Store
