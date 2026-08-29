@@ -9,10 +9,10 @@ function service(state: KubeconfigState): KubeconfigService {
 		setCurrent: async () => {},
 		onChange: () => () => {},
 		dispose: () => {},
-	} as unknown as KubeconfigService;
+	};
 }
 
-const OK: KubeconfigState = { contexts: ["dev", "eu"], current: "dev", ok: true };
+const OK: KubeconfigState = { contexts: ["dev", "eu"], current: "dev", currentInvalid: false, ok: true };
 
 describe("buildDataSourceReply", () => {
 	it("returns every context as a label and value pair", () => {
@@ -26,7 +26,7 @@ describe("buildDataSourceReply", () => {
 	});
 
 	it("returns an empty item list when the kubeconfig is unreadable", () => {
-		expect(buildDataSourceReply("getContexts", service({ contexts: [], current: null, ok: false }))).toEqual({
+		expect(buildDataSourceReply("getContexts", service({ contexts: [], current: null, currentInvalid: false, ok: false }))).toEqual({
 			event: "getContexts",
 			items: [],
 		});
