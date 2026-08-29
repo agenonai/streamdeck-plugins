@@ -48,6 +48,17 @@ pnpm --filter @agenon/streamdeck-k3s-context dev
 5. Run `pnpm install` from the repository root so the new package joins the
    workspace, then run `pnpm typecheck && pnpm test && pnpm validate`.
 
+## Releasing
+
+Pushing a `v*` tag triggers the `release` job in `.github/workflows/ci.yml`,
+which runs `streamdeck pack` on each plugin and attaches the resulting
+`.streamDeckPlugin` files to a GitHub release. Note that `streamdeck pack`
+rewrites `manifest.json` in place (reformats indentation and drops the
+trailing newline) before packing, so the packed artifact's manifest
+formatting will differ from the tracked source in git; this is harmless in
+CI's ephemeral checkout, but if you run `streamdeck pack` locally, revert the
+resulting `manifest.json` change before committing anything else.
+
 ## License
 
 MIT, see [LICENSE](./LICENSE).

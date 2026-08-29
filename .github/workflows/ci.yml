@@ -25,7 +25,7 @@ jobs:
         run: |
           for dir in plugins/*/*.sdPlugin; do
             echo "validating $dir"
-            streamdeck validate "$dir"
+            streamdeck validate "$dir" || exit 1
           done
 
   release:
@@ -44,10 +44,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: npm install -g @elgato/cli
+      # streamdeck pack rewrites manifest.json in place (reformats indentation,
+      # drops the trailing newline) before packing, so the packed artifact's
+      # manifest formatting will differ from the tracked source in git.
       - name: Pack plugins
         run: |
           for dir in plugins/*/*.sdPlugin; do
-            streamdeck pack "$dir" --output dist-packs
+            streamdeck pack "$dir" --output dist-packs || exit 1
           done
       - uses: softprops/action-gh-release@v2
         with:
