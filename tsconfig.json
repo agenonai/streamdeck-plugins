@@ -1,4 +1,9 @@
 {
   "include": [],
-  "references": [{ "path": "packages/kubeconfig" }, { "path": "plugins/k3s-context" }]
+  "references": [
+    { "path": "packages/kubeconfig" },
+    { "path": "packages/kubeconfig/tsconfig.test.json" },
+    { "path": "plugins/k3s-context" },
+    { "path": "plugins/k3s-context/tsconfig.test.json" }
+  ]
 }

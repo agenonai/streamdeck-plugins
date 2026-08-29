@@ -8,7 +8,7 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
   "scripts": {
     "build": "tsc --build",
-    "clean": "rm -rf dist *.tsbuildinfo"
+    "clean": "rm -rf dist dist-test *.tsbuildinfo"
   },
   "dependencies": {
     "yaml": "^2.6.0"

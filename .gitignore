@@ -6,3 +6,4 @@ plugins/*/*.sdPlugin/logs/
 logs/
 *.streamDeckPlugin
 .DS_Store
+dist-test/
