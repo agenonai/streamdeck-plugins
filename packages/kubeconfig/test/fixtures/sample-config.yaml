@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Config
+# Agenon clusters
+current-context: agenon-vn-2
+contexts:
+  - name: agenon-vn-2
+    context:
+      cluster: agenon-vn-2
+      user: agenon-vn-2
+  - name: dev
+    context:
+      cluster: dev
+      user: default_dev
+      namespace: default
+  - name: eu
+    context:
+      cluster: eu
+      user: eu
+      namespace: monitoring
+clusters: []
+users: []

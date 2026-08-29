@@ -21,6 +21,12 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)
 
+  packages/kubeconfig:
+    dependencies:
+      yaml:
+        specifier: ^2.6.0
+        version: 2.9.0
+
 packages:
 
   '@emnapi/runtime@1.11.3':
@@ -661,6 +667,11 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  yaml@2.9.0:
+    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
 snapshots:
 
   '@emnapi/runtime@1.11.3':
@@ -1192,3 +1203,5 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  yaml@2.9.0: {}
