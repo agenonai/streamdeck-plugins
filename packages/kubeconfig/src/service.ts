@@ -38,9 +38,9 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 	let state: KubeconfigState = NOT_OK;
 	let watcher: FSWatcher | null = null;
 	// The backup must capture the file as it was before this process's first
-	// write, not the state produced by an earlier write from this same
-	// service. Once a write succeeds this flips to true and stays true, so
-	// every later write passes backup: false.
+	// actual write, not the state produced by an earlier write from this same
+	// service. Only a call that actually rewrites the file flips this to
+	// true; a no-op setCurrent (already the active context) must not.
 	let backedUp = false;
 
 	async function read(): Promise<KubeconfigState> {
@@ -71,6 +71,9 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 		getState: () => state,
 		refresh,
 		async setCurrent(name: string): Promise<void> {
+			if (state.ok && state.current === name) {
+				return;
+			}
 			await writeCurrentContext(path, name, { backup: !backedUp });
 			backedUp = true;
 			await refresh();

@@ -89,4 +89,10 @@ describe("createKubeconfigService", () => {
 		await service.setCurrent("agenon-vn-2");
 		expect(await readFile(`${path}.streamdeck-bak`, "utf8")).toBe(CONFIG);
 	});
+
+	it("a no-op setCurrent does not consume the backup before the first real write", async () => {
+		await service.setCurrent("agenon-vn-2");
+		await service.setCurrent("dev");
+		expect(await readFile(`${path}.streamdeck-bak`, "utf8")).toBe(CONFIG);
+	});
 });
