@@ -42,6 +42,11 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 	// service. Only a call that actually rewrites the file flips this to
 	// true; a no-op setCurrent (already the active context) must not.
 	let backedUp = false;
+	// Serializes setCurrent calls so overlapping key presses do not race on
+	// write.ts's shared sibling temp file. Each caller awaits its own result
+	// via `run`; `queue` only tracks completion (success or failure) so a
+	// rejected call does not poison later calls in the chain.
+	let queue: Promise<void> = Promise.resolve();
 
 	async function read(): Promise<KubeconfigState> {
 		try {
@@ -70,13 +75,20 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 	return {
 		getState: () => state,
 		refresh,
-		async setCurrent(name: string): Promise<void> {
-			if (state.ok && state.current === name) {
-				return;
-			}
-			await writeCurrentContext(path, name, { backup: !backedUp });
-			backedUp = true;
-			await refresh();
+		setCurrent(name: string): Promise<void> {
+			const run = queue.then(async () => {
+				if (state.ok && state.current === name) {
+					return;
+				}
+				await writeCurrentContext(path, name, { backup: !backedUp });
+				backedUp = true;
+				await refresh();
+			});
+			queue = run.then(
+				() => undefined,
+				() => undefined,
+			);
+			return run;
 		},
 		onChange(listener): () => void {
 			listeners.add(listener);

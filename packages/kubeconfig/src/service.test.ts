@@ -95,4 +95,33 @@ describe("createKubeconfigService", () => {
 		await service.setCurrent("dev");
 		expect(await readFile(`${path}.streamdeck-bak`, "utf8")).toBe(CONFIG);
 	});
+
+	it("serializes concurrent setCurrent calls instead of racing on the temp file", async () => {
+		const threeContexts = CONFIG.replace("  - name: dev\n", "  - name: dev\n  - name: staging\n");
+		await writeFile(path, threeContexts);
+		await service.refresh();
+
+		const results = await Promise.allSettled([
+			service.setCurrent("dev"),
+			service.setCurrent("staging"),
+			service.setCurrent("agenon-vn-2"),
+		]);
+
+		expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+		expect(service.getState().current).toBe("agenon-vn-2");
+		expect(await readFile(path, "utf8")).toContain("current-context: agenon-vn-2");
+	});
+
+	it("a rejected call in the middle of the chain does not block a later valid call", async () => {
+		const results = await Promise.allSettled([
+			service.setCurrent("dev"),
+			service.setCurrent("no-such-context"),
+			service.setCurrent("agenon-vn-2"),
+		]);
+
+		expect(results[0]?.status).toBe("fulfilled");
+		expect(results[1]?.status).toBe("rejected");
+		expect(results[2]?.status).toBe("fulfilled");
+		expect(service.getState().current).toBe("agenon-vn-2");
+	});
 });
