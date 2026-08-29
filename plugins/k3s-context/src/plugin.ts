@@ -1,7 +1,7 @@
 import { createKubeconfigService } from "@agenon/kubeconfig";
-import streamDeck, { LogLevel } from "@elgato/streamdeck";
+import streamDeck from "@elgato/streamdeck";
 
-streamDeck.logger.setLevel(LogLevel.INFO);
+streamDeck.logger.setLevel("info");
 
 const service = createKubeconfigService();
 
