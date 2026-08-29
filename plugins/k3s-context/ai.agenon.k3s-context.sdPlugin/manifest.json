@@ -1,0 +1,43 @@
+{
+  "Name": "Kubernetes Context",
+  "Version": "0.1.0.0",
+  "Author": "Agenon",
+  "Description": "Show and switch the active Kubernetes context.",
+  "Category": "Kubernetes",
+  "CategoryIcon": "imgs/plugin/category-icon",
+  "Icon": "imgs/plugin/marketplace",
+  "URL": "https://agenon.ai",
+  "UUID": "ai.agenon.k3s-context",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 3,
+  "Nodejs": { "Version": "20" },
+  "Software": { "MinimumVersion": "6.9" },
+  "OS": [
+    { "Platform": "mac", "MinimumVersion": "12" },
+    { "Platform": "windows", "MinimumVersion": "10" }
+  ],
+  "Actions": [
+    {
+      "Name": "Cycle Context",
+      "UUID": "ai.agenon.k3s-context.cycle",
+      "Icon": "imgs/actions/cycle/icon",
+      "Tooltip": "Show the active Kubernetes context and cycle through a chosen list.",
+      "PropertyInspectorPath": "ui/cycle-context.html",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/actions/cycle/key", "TitleAlignment": "middle", "FontSize": 10 }]
+    },
+    {
+      "Name": "Pin Context",
+      "UUID": "ai.agenon.k3s-context.pin",
+      "Icon": "imgs/actions/pin/icon",
+      "Tooltip": "Switch to one specific Kubernetes context.",
+      "PropertyInspectorPath": "ui/pin-context.html",
+      "Controllers": ["Keypad"],
+      "DisableAutomaticStates": true,
+      "States": [
+        { "Image": "imgs/actions/pin/key-inactive", "TitleAlignment": "middle", "FontSize": 10 },
+        { "Image": "imgs/actions/pin/key-active", "TitleAlignment": "middle", "FontSize": 10 }
+      ]
+    }
+  ]
+}
