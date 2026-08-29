@@ -1,1 +1,21 @@
-<!doctype html><html><body></body></html>
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+	</head>
+	<body>
+		<sdpi-item label="Context">
+			<sdpi-select
+				setting="context"
+				datasource="getContexts"
+				loading="Reading kubeconfig..."
+				placeholder="Choose a context"
+				hot-reload
+			></sdpi-select>
+		</sdpi-item>
+		<p style="color: var(--color-content-secondary); font-size: 9pt; padding: 0 8px">
+			The key lights up while this context is active.
+		</p>
+	</body>
+</html>

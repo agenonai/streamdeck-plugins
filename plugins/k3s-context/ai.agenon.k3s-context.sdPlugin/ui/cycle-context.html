@@ -1,1 +1,20 @@
-<!doctype html><html><body></body></html>
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+	</head>
+	<body>
+		<sdpi-item label="Contexts">
+			<sdpi-checkbox-list
+				setting="contexts"
+				datasource="getContexts"
+				loading="Reading kubeconfig..."
+				hot-reload
+			></sdpi-checkbox-list>
+		</sdpi-item>
+		<p style="color: var(--color-content-secondary); font-size: 9pt; padding: 0 8px">
+			Pressing the key moves to the next checked context, in kubeconfig order.
+		</p>
+	</body>
+</html>
