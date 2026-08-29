@@ -6,7 +6,12 @@ import { buildDataSourceReply } from "./data-source.js";
 
 streamDeck.logger.setLevel("info");
 
-const service = createKubeconfigService();
+// The kubeconfig file watcher is the only signal for changes made outside
+// the plugin (`kubectl config use-context`, a hand edit). If it dies, the
+// keys just quietly stop updating, so surface the failure in the plugin log.
+const service = createKubeconfigService({
+	onError: (err) => streamDeck.logger.error("kubeconfig watcher failed, external changes will not be detected", err),
+});
 const cycle = new CycleContextAction(service);
 const pin = new PinContextAction(service);
 

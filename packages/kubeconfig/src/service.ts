@@ -19,14 +19,21 @@ export type KubeconfigService = {
 export type ServiceOptions = {
 	path?: string;
 	debounceMs?: number;
+	/**
+	 * Called when the file watcher cannot start or dies later on. External
+	 * change detection is silently lost when that happens, so the host wires
+	 * this to its logger rather than letting the failure go unreported.
+	 */
+	onError?: (err: unknown) => void;
 };
 
-const NOT_OK: KubeconfigState = { contexts: [], current: null, ok: false };
+const NOT_OK: KubeconfigState = { contexts: [], current: null, currentInvalid: false, ok: false };
 
 function sameState(a: KubeconfigState, b: KubeconfigState): boolean {
 	return (
 		a.ok === b.ok &&
 		a.current === b.current &&
+		a.currentInvalid === b.currentInvalid &&
 		a.contexts.length === b.contexts.length &&
 		a.contexts.every((name, index) => name === b.contexts[index])
 	);
@@ -68,9 +75,14 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 		return state;
 	}
 
-	watcher = watchFile(path, opts.debounceMs ?? 150, () => {
-		void refresh();
-	});
+	watcher = watchFile(
+		path,
+		opts.debounceMs ?? 150,
+		() => {
+			void refresh();
+		},
+		(err) => opts.onError?.(err),
+	);
 
 	return {
 		getState: () => state,

@@ -1,8 +1,9 @@
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { parseKubeconfig } from "./parse.js";
 import { writeCurrentContext } from "./write.js";
 
 const ORIGINAL = `apiVersion: v1
@@ -290,5 +291,252 @@ users: []
 		const after = await readFile(noNewlinePath, "utf8");
 		expect(after).toBe(original.replace("current-context: agenon-vn-2", "current-context: dev"));
 		expect(after.endsWith("\n")).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Regression cover for the splice corruptions found in the final review.
+// Each fixture below produced an unparseable or a never-converging kubeconfig
+// before the write path started validating its own output.
+// ---------------------------------------------------------------------------
+
+/** Writes text to a fresh temp file and returns its path. */
+async function tempConfig(text: string, prefix: string): Promise<string> {
+	const dir = await mkdtemp(join(tmpdir(), prefix));
+	const file = join(dir, "config");
+	await writeFile(file, text, { mode: 0o600 });
+	return file;
+}
+
+/**
+ * A minimal kubeconfig. currentContext is spliced in verbatim so a fixture
+ * can pin an exact value form (block scalar, empty, quoted).
+ */
+function configWith(currentContext: string, names: string[]): string {
+	const contexts = names.map((name) => `  - name: ${JSON.stringify(name)}\n`).join("");
+	return `apiVersion: v1
+kind: Config
+${currentContext}
+afterwards: keepme
+contexts:
+${contexts}clusters: []
+users: []
+`;
+}
+
+/** The lines that differ between two texts of the same line count. */
+function changedLines(before: string, after: string): string[] {
+	const previous = before.split("\n");
+	return after.split("\n").filter((line, index) => line !== previous[index]);
+}
+
+describe("writeCurrentContext with a block scalar value", () => {
+	it("does not swallow the newline that ends a folded block scalar", async () => {
+		const original = configWith("current-context: >-\n  alpha", ["alpha", "beta"]);
+		const path = await tempConfig(original, "kubeconfig-folded-");
+
+		await writeCurrentContext(path, "beta", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toBe(configWith("current-context: beta", ["alpha", "beta"]));
+		expect(after).toContain("\nafterwards: keepme\n");
+		expect(parseKubeconfig(after).state.current).toBe("beta");
+	});
+
+	it("does not swallow the newline that ends a literal block scalar", async () => {
+		const original = configWith("current-context: |-\n  alpha", ["alpha", "beta"]);
+		const path = await tempConfig(original, "kubeconfig-literal-");
+
+		await writeCurrentContext(path, "beta", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toBe(configWith("current-context: beta", ["alpha", "beta"]));
+		expect(after).toContain("\nafterwards: keepme\n");
+		expect(parseKubeconfig(after).state.current).toBe("beta");
+	});
+
+	it("keeps a value indented on the line below its key readable", async () => {
+		const original = configWith("current-context:\n  alpha", ["alpha", "beta"]);
+		const path = await tempConfig(original, "kubeconfig-indented-");
+
+		await writeCurrentContext(path, "beta", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toBe(configWith("current-context:\n  beta", ["alpha", "beta"]));
+		expect(parseKubeconfig(after).state.current).toBe("beta");
+	});
+});
+
+describe("writeCurrentContext with an empty value", () => {
+	it("emits a separating space when the key has no value at all", async () => {
+		const original = configWith("current-context:", ["alpha", "beta"]);
+		const path = await tempConfig(original, "kubeconfig-empty-");
+
+		await writeCurrentContext(path, "beta", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toContain("current-context: beta\n");
+		expect(after).not.toContain("current-context:beta");
+		expect(after).toBe(configWith("current-context: beta", ["alpha", "beta"]));
+		expect(parseKubeconfig(after).state.current).toBe("beta");
+	});
+
+	it("absorbs trailing spaces after an empty key instead of doubling them", async () => {
+		const original = configWith("current-context:   ", ["alpha", "beta"]);
+		const path = await tempConfig(original, "kubeconfig-empty-spaced-");
+
+		await writeCurrentContext(path, "beta", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toBe(configWith("current-context: beta", ["alpha", "beta"]));
+		expect(parseKubeconfig(after).state.current).toBe("beta");
+	});
+
+	it("emits a separating space for an empty key at the very end of the file", async () => {
+		const original = "apiVersion: v1\ncontexts:\n  - name: beta\nclusters: []\ncurrent-context:";
+		const path = await tempConfig(original, "kubeconfig-empty-eof-");
+
+		await writeCurrentContext(path, "beta", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toBe("apiVersion: v1\ncontexts:\n  - name: beta\nclusters: []\ncurrent-context: beta");
+		expect(parseKubeconfig(after).state.current).toBe("beta");
+	});
+});
+
+// A context may legally be named `true`, `0755` or `a: b #c`. Written bare,
+// YAML reads the first two back as a boolean and an integer and the third
+// does not parse at all, so the key never converges on the requested name and
+// every key press rewrites the file.
+const ODD_NAMES = ["true", "false", "yes", "no", "null", "~", "0755", "0x1f", "a: b #c", "dev # prod", "2026-01-01", "1.0"];
+
+describe("writeCurrentContext with a context name YAML would reinterpret", () => {
+	for (const name of ODD_NAMES) {
+		it(`writes ${JSON.stringify(name)} so it reads back as exactly that string`, async () => {
+			const original = configWith("current-context: alpha", ["alpha", name]);
+			const path = await tempConfig(original, "kubeconfig-odd-");
+
+			await writeCurrentContext(path, name, { backup: false });
+
+			const after = await readFile(path, "utf8");
+			const parsed = parseKubeconfig(after).state;
+			expect(parsed.ok).toBe(true);
+			expect(parsed.current).toBe(name);
+			expect(parsed.currentInvalid).toBe(false);
+			expect(parsed.contexts).toEqual(["alpha", name]);
+			expect(after.split("\n")).toHaveLength(original.split("\n").length);
+			expect(changedLines(original, after)).toHaveLength(1);
+		});
+
+		it(`converges on ${JSON.stringify(name)}, so a second press rewrites nothing`, async () => {
+			const original = configWith("current-context: alpha", ["alpha", name]);
+			const path = await tempConfig(original, "kubeconfig-odd-converge-");
+
+			await writeCurrentContext(path, name, { backup: false });
+			const first = await readFile(path, "utf8");
+			await writeCurrentContext(path, name, { backup: false });
+
+			expect(await readFile(path, "utf8")).toBe(first);
+		});
+	}
+
+	it("keeps single quotes and doubles an apostrophe inside the new name", async () => {
+		const original = configWith("current-context: 'alpha'", ["alpha", "kev's-lab"]);
+		const path = await tempConfig(original, "kubeconfig-single-");
+
+		await writeCurrentContext(path, "kev's-lab", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toContain("current-context: 'kev''s-lab'\n");
+		expect(parseKubeconfig(after).state.current).toBe("kev's-lab");
+	});
+
+	it("keeps double quotes and escapes a quote inside the new name", async () => {
+		const original = configWith('current-context: "alpha"', ["alpha", 'say "hi"']);
+		const path = await tempConfig(original, "kubeconfig-double-");
+
+		await writeCurrentContext(path, 'say "hi"', { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toContain('current-context: "say \\"hi\\""\n');
+		expect(parseKubeconfig(after).state.current).toBe('say "hi"');
+	});
+
+	it("quotes an appended key when the name would not survive bare", async () => {
+		const original = "apiVersion: v1\ncontexts:\n  - name: \"true\"\nclusters: []\n";
+		const path = await tempConfig(original, "kubeconfig-append-odd-");
+
+		await writeCurrentContext(path, "true", { backup: false });
+
+		const after = await readFile(path, "utf8");
+		expect(after).toBe(`${original}current-context: "true"\n`);
+		expect(parseKubeconfig(after).state.current).toBe("true");
+	});
+});
+
+describe("writeCurrentContext output validation", () => {
+	// The splice here is byte-correct, but the value carries a !!binary tag, so
+	// YAML reads the replacement back as a buffer rather than as the context
+	// name. The write is refused instead of leaving a kubeconfig behind that
+	// names no usable context.
+	it("refuses a splice whose result would not read back as the requested name", async () => {
+		const original = configWith("current-context: !!binary YWxwaGE=", ["alpha", "beta"]);
+		const path = await tempConfig(original, "kubeconfig-backstop-");
+
+		await expect(writeCurrentContext(path, "beta", { backup: false })).rejects.toThrow(/refusing to write/i);
+
+		expect(await readFile(path, "utf8")).toBe(original);
+		expect(existsSync(`${path}.streamdeck-tmp`)).toBe(false);
+		expect(existsSync(`${path}.streamdeck-bak`)).toBe(false);
+	});
+});
+
+describe("writeCurrentContext through a symlink", () => {
+	async function linked(): Promise<{ real: string; link: string }> {
+		const realDir = await mkdtemp(join(tmpdir(), "kubeconfig-real-"));
+		const linkDir = await mkdtemp(join(tmpdir(), "kubeconfig-link-"));
+		const real = join(realDir, "config");
+		const link = join(linkDir, "config");
+		await writeFile(real, ORIGINAL, { mode: 0o600 });
+		await symlink(real, link);
+		return { real, link };
+	}
+
+	const SWITCHED = ORIGINAL.replace("current-context: agenon-vn-2", "current-context: dev");
+
+	it("keeps the path a symlink and updates the file it points at", async () => {
+		const { real, link } = await linked();
+
+		await writeCurrentContext(link, "dev");
+
+		expect((await lstat(link)).isSymbolicLink()).toBe(true);
+		expect(await readFile(real, "utf8")).toBe(SWITCHED);
+		expect(await readFile(link, "utf8")).toBe(SWITCHED);
+	});
+
+	it("puts the backup next to the real file, not next to the link", async () => {
+		const { real, link } = await linked();
+
+		await writeCurrentContext(link, "dev");
+
+		expect(await readFile(`${real}.streamdeck-bak`, "utf8")).toBe(ORIGINAL);
+		expect(existsSync(`${link}.streamdeck-bak`)).toBe(false);
+	});
+
+	it("leaves no temp file beside the link or the target", async () => {
+		const { real, link } = await linked();
+
+		await writeCurrentContext(link, "dev");
+
+		expect(existsSync(`${link}.streamdeck-tmp`)).toBe(false);
+		expect(existsSync(`${real}.streamdeck-tmp`)).toBe(false);
+	});
+
+	it("refuses a broken symlink with a message that says so", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "kubeconfig-broken-link-"));
+		const link = join(dir, "config");
+		await symlink(join(dir, "gone"), link);
+
+		await expect(writeCurrentContext(link, "dev")).rejects.toThrow(/symlink to .*which does not exist/i);
 	});
 });

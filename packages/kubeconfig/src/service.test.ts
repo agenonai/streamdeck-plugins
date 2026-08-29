@@ -38,7 +38,12 @@ afterEach(() => service.dispose());
 
 describe("createKubeconfigService", () => {
 	it("exposes the parsed state", () => {
-		expect(service.getState()).toEqual({ contexts: ["agenon-vn-2", "dev"], current: "agenon-vn-2", ok: true });
+		expect(service.getState()).toEqual({
+			contexts: ["agenon-vn-2", "dev"],
+			current: "agenon-vn-2",
+			currentInvalid: false,
+			ok: true,
+		});
 	});
 
 	it("setCurrent writes the file and updates the state", async () => {
@@ -74,7 +79,7 @@ describe("createKubeconfigService", () => {
 
 	it("reports a not-ok state for a missing file without throwing", async () => {
 		const missing = createKubeconfigService({ path: join(tmpdir(), "definitely-not-here", "config") });
-		expect(await missing.refresh()).toEqual({ contexts: [], current: null, ok: false });
+		expect(await missing.refresh()).toEqual({ contexts: [], current: null, currentInvalid: false, ok: false });
 		missing.dispose();
 	});
 
@@ -110,6 +115,19 @@ describe("createKubeconfigService", () => {
 		expect(results.every((result) => result.status === "fulfilled")).toBe(true);
 		expect(service.getState().current).toBe("agenon-vn-2");
 		expect(await readFile(path, "utf8")).toContain("current-context: agenon-vn-2");
+	});
+
+	// The file watcher is the only signal for changes made outside the plugin,
+	// so a watcher that never starts has to be reported, not swallowed.
+	it("surfaces a watcher that cannot start through onError", () => {
+		const errors: unknown[] = [];
+		const broken = createKubeconfigService({
+			path: join(tmpdir(), "kubeconfig-no-such-directory-4b21", "config"),
+			onError: (err) => errors.push(err),
+		});
+
+		expect(errors).toHaveLength(1);
+		broken.dispose();
 	});
 
 	it("a rejected call in the middle of the chain does not block a later valid call", async () => {
