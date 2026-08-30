@@ -47,6 +47,31 @@ function fakeService(initial: KubeconfigState, health: () => HealthStatus = () =
 	};
 }
 
+/**
+ * Mirrors the real service's keyVisible() bookkeeping: each call increments
+ * a shared counter and returns a disposer that decrements it exactly once.
+ * Lets a test assert the net visible-key count survives a repeated
+ * onWillAppear for the same key id without an intervening onWillDisappear
+ * (Stream Deck resends willAppear on device reconnect and profile switch).
+ */
+function fakeVisibilityCounter(): { keyVisible: () => () => void; count: () => number } {
+	let count = 0;
+	return {
+		keyVisible: () => {
+			count += 1;
+			let released = false;
+			return () => {
+				if (released) {
+					return;
+				}
+				released = true;
+				count -= 1;
+			};
+		},
+		count: () => count,
+	};
+}
+
 /** Narrow casts: the fakes carry only the members these handlers touch. */
 function willAppear(key: FakeKey): WillAppearEvent<PinSettings> {
 	return { action: key } as unknown as WillAppearEvent<PinSettings>;
@@ -180,6 +205,27 @@ describe("PinContextAction", () => {
 
 		await action.onWillDisappear(willDisappear(key));
 		expect(release).toHaveBeenCalledTimes(1);
+	});
+
+	// Stream Deck resends onWillAppear for the same action id on device
+	// reconnect and profile switch, without an intervening onWillDisappear.
+	// A naive Map.set would overwrite the first disposer, leaking its
+	// increment: proven by deleting the release-before-set guard and
+	// watching this fail with count 1 instead of 0 after the single
+	// disappear.
+	it("releases the previous visibility hold before registering a new one on a repeated appear", async () => {
+		const visibility = fakeVisibilityCounter();
+		const service = fakeService(STATE);
+		service.keyVisible = visibility.keyVisible;
+		const key = fakeKey({ context: "dev" });
+		const action = new PinContextAction(service);
+
+		await action.onWillAppear(willAppear(key));
+		await action.onWillAppear(willAppear(key));
+		expect(visibility.count()).toBe(1);
+
+		await action.onWillDisappear(willDisappear(key));
+		expect(visibility.count()).toBe(0);
 	});
 
 	it("repaints every visible key when a status change comes through render()", async () => {

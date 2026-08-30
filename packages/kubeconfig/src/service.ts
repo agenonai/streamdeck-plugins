@@ -43,6 +43,15 @@ export type ServiceOptions = {
 	 * this to its logger rather than letting the failure go unreported.
 	 */
 	onError?: (err: unknown) => void;
+	/**
+	 * Called at most once per context name when its credentials cannot be
+	 * resolved from the kubeconfig (an exec plugin, a bearer token,
+	 * insecure-skip-tls-verify, missing certificate data, and so on). The
+	 * context's health still reports "down" in this case; this callback
+	 * exists purely so the reason is not silently discarded, without
+	 * repeating it on every 30 second poll.
+	 */
+	onCredentialsUnavailable?: (contextName: string, reason: string) => void;
 	/** Overrides the 30 second health polling interval; for tests only. */
 	healthIntervalMs?: number;
 	/** Overrides the 5 second health probe timeout; for tests only. */
@@ -87,6 +96,9 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 	// interval tick and a context change can all ask for a probe around the
 	// same time, and only one in-flight request per context is useful.
 	const probesInFlight = new Set<string>();
+	// Reported once per context name, ever, so an unsupported auth method or
+	// insecure-skip-tls-verify is logged once instead of every poll.
+	const reportedCredentialFailures = new Set<string>();
 	let visibleKeyCount = 0;
 	let pollHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -113,7 +125,16 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 		void (async () => {
 			try {
 				const credentials = await resolveCredentials(path, name);
-				const result: HealthStatus = credentials.ok ? await probe(credentials.value, healthTimeoutMs) : "down";
+				let result: HealthStatus;
+				if (credentials.ok) {
+					result = await probe(credentials.value, healthTimeoutMs);
+				} else {
+					result = "down";
+					if (!reportedCredentialFailures.has(name)) {
+						reportedCredentialFailures.add(name);
+						opts.onCredentialsUnavailable?.(name, credentials.reason);
+					}
+				}
 				if (healthByContext.get(name) !== result) {
 					healthByContext.set(name, result);
 					if (state.current === name) {

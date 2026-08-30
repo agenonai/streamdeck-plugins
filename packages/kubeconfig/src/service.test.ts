@@ -11,9 +11,13 @@ import { createKubeconfigService, type KubeconfigService, type KubeconfigState }
 const probeMock = vi.hoisted(() => vi.fn<() => Promise<"ok" | "down">>(async () => "ok"));
 vi.mock("./health.js", () => ({ probe: probeMock }));
 
+type CredentialsResultForTest =
+	| { ok: true; value: { server: string; ca: Buffer; cert: Buffer; key: Buffer } }
+	| { ok: false; reason: string };
+
 const credentialsMock = vi.hoisted(() =>
-	vi.fn(async () => ({
-		ok: true as const,
+	vi.fn<() => Promise<CredentialsResultForTest>>(async () => ({
+		ok: true,
 		value: { server: "https://example.invalid", ca: Buffer.alloc(0), cert: Buffer.alloc(0), key: Buffer.alloc(0) },
 	})),
 );
@@ -252,15 +256,52 @@ describe("health status", () => {
 		svc.dispose();
 	});
 
+	// Regression note: measuring probeMock.mock.calls.length synchronously
+	// right after svc.refresh() is a trap. probeActive() adds to
+	// probesInFlight synchronously, but the mocked resolveCredentials()
+	// still needs a microtask to resolve before probe() itself is ever
+	// called, so a synchronous assertion here passes (0 === 0) whether or
+	// not the dedupe guard exists: neither path has reached probe() yet.
+	// Waiting for the first call to actually land is what makes this test
+	// capable of failing: without the guard, releasing keyVisible() while
+	// the first probe is genuinely in flight calls probe() a second time.
 	it("does not start a second probe for a context while one is already in flight", async () => {
 		probeMock.mockImplementationOnce(() => new Promise(() => {}));
 		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
 		await svc.refresh();
+		await waitFor(() => probeMock.mock.calls.length >= 1);
 		const callsSoFar = probeMock.mock.calls.length;
 
 		svc.keyVisible();
+		await new Promise((resolve) => setTimeout(resolve, 40));
 
 		expect(probeMock.mock.calls.length).toBe(callsSoFar);
+		svc.dispose();
+	});
+
+	// Regression note: healthByContext must be keyed per context name, not a
+	// single shared slot. A then B then back to A is what actually exercises
+	// that: with a shared slot, B's resolved result would still be showing
+	// once the service is back on A, because a shared write would overwrite
+	// the one place A's own result was recorded.
+	it("keeps a distinct cached health per context: A, then B, then back to A shows A's own result", async () => {
+		probeMock.mockResolvedValueOnce("down"); // probe #1: agenon-vn-2 (initial current)
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "down");
+
+		probeMock.mockResolvedValueOnce("ok"); // probe #2: dev
+		await writeFile(healthPath, CONFIG.replace('agenon-vn-2\ncontexts', 'dev\ncontexts'));
+		await waitFor(() => svc.getState().current === "dev");
+		await waitFor(() => svc.getHealth() === "ok");
+
+		// probe #3, for the return to agenon-vn-2, is left pending so the
+		// assertion below observes the cache, not a fresh resolution.
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		await writeFile(healthPath, CONFIG);
+		await waitFor(() => svc.getState().current === "agenon-vn-2");
+
+		expect(svc.getHealth()).toBe("down");
 		svc.dispose();
 	});
 
@@ -291,6 +332,29 @@ describe("health status", () => {
 
 		expect(probeMock).not.toHaveBeenCalled();
 		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
+	});
+
+	it("reports down and surfaces the reason once when credentials cannot be resolved", async () => {
+		credentialsMock.mockResolvedValueOnce({ ok: false, reason: "user prod-user uses an exec plugin, which is not supported" });
+		const reasons: Array<[string, string]> = [];
+		const svc = createKubeconfigService({
+			path: healthPath,
+			debounceMs: 20,
+			healthIntervalMs: 20,
+			onCredentialsUnavailable: (contextName, reason) => reasons.push([contextName, reason]),
+		});
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "down");
+		expect(probeMock).not.toHaveBeenCalled();
+		expect(reasons).toEqual([["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"]]);
+
+		// The next poll fails the same way; the callback must not fire again.
+		credentialsMock.mockResolvedValueOnce({ ok: false, reason: "user prod-user uses an exec plugin, which is not supported" });
+		svc.keyVisible();
+		await new Promise((resolve) => setTimeout(resolve, 60));
+
+		expect(reasons).toEqual([["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"]]);
 		svc.dispose();
 	});
 });

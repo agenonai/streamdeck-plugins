@@ -33,6 +33,11 @@ export class PinContextAction extends SingletonAction<PinSettings> {
 	}
 
 	override async onWillAppear(ev: WillAppearEvent<PinSettings>): Promise<void> {
+		// Stream Deck resends onWillAppear for the same action id on device
+		// reconnect and profile switch, without an intervening onWillDisappear.
+		// Releasing any existing hold first keeps one hold per key, not one per
+		// appear, so a single later onWillDisappear does not leak the rest.
+		this.visibility.get(ev.action.id)?.();
 		this.visibility.set(ev.action.id, this.service.keyVisible());
 		const settings = await ev.action.getSettings<PinSettings>();
 		await this.paint(ev.action as KeyAction<PinSettings>, settings.context);

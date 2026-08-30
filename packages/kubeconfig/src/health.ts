@@ -8,20 +8,35 @@ import type { Credentials } from "./credentials.js";
  * already resolved by credentials.ts and issues a single HTTPS request.
  *
  * Never throws and never rejects. A 200 response resolves "ok"; a connection
- * refusal, a timeout, a TLS failure (untrusted CA, missing or wrong client
- * certificate) or any non-200 response resolves "down". On timeout the
- * underlying request is destroyed so no socket or timer is left behind.
+ * refusal, a TLS failure (untrusted CA, missing or wrong client certificate),
+ * any non-200 response, or the request not completing within timeoutMs all
+ * resolve "down".
+ *
+ * The deadline is wall-clock, not socket-inactivity: `timeoutMs` is enforced
+ * by a plain setTimeout that always destroys the request and settles the
+ * promise, so a server that keeps the connection alive by trickling bytes
+ * (rather than going idle) still gets cut off on schedule. Whichever settles
+ * first, that outcome wins and the deadline timer is always cleared, so no
+ * timer or socket is left behind either way.
  */
 export async function probe(creds: Credentials, timeoutMs: number): Promise<"ok" | "down"> {
 	return new Promise((resolve) => {
 		let settled = false;
-		const finish = (result: "ok" | "down"): void => {
+		let req: ReturnType<typeof request> | undefined;
+
+		const deadline = setTimeout(() => {
+			finish("down");
+			req?.destroy(new Error("health probe timed out"));
+		}, timeoutMs);
+
+		function finish(result: "ok" | "down"): void {
 			if (settled) {
 				return;
 			}
 			settled = true;
+			clearTimeout(deadline);
 			resolve(result);
-		};
+		}
 
 		let url: URL;
 		try {
@@ -32,16 +47,15 @@ export async function probe(creds: Credentials, timeoutMs: number): Promise<"ok"
 		}
 
 		try {
-			const req = request(
+			req = request(
 				{
-					hostname: url.hostname,
+					hostname: bareHost(url.hostname),
 					port: url.port === "" ? 443 : Number(url.port),
-					path: "/readyz",
+					path: joinReadyzPath(url.pathname),
 					method: "GET",
 					ca: creds.ca,
 					cert: creds.cert,
 					key: creds.key,
-					timeout: timeoutMs,
 				},
 				(res) => {
 					res.on("data", () => {
@@ -52,9 +66,6 @@ export async function probe(creds: Credentials, timeoutMs: number): Promise<"ok"
 				},
 			);
 
-			req.on("timeout", () => {
-				req.destroy(new Error("health probe timed out"));
-			});
 			req.on("error", () => {
 				finish("down");
 			});
@@ -63,4 +74,25 @@ export async function probe(creds: Credentials, timeoutMs: number): Promise<"ok"
 			finish("down");
 		}
 	});
+}
+
+/**
+ * `new URL(...).hostname` keeps the surrounding brackets for an IPv6
+ * literal (`"[::1]"`), which is correct for re-serializing a URL but wrong
+ * as a `net.connect`/`tls.connect` hostname: passed through as-is, Node
+ * treats it as a DNS name instead of a literal address, and the connection
+ * never reaches the real host.
+ */
+function bareHost(hostname: string): string {
+	return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+}
+
+/**
+ * Joins the cluster server's own path (a reverse proxy prefix, for example)
+ * with /readyz, instead of always probing bare /readyz and missing the
+ * prefix entirely.
+ */
+function joinReadyzPath(pathname: string): string {
+	const base = pathname.endsWith("/") ? pathname : `${pathname}/`;
+	return `${base}readyz`;
 }

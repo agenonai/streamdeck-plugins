@@ -11,6 +11,12 @@ streamDeck.logger.setLevel("info");
 // keys just quietly stop updating, so surface the failure in the plugin log.
 const service = createKubeconfigService({
 	onError: (err) => streamDeck.logger.error("kubeconfig watcher failed, external changes will not be detected", err),
+	// Credentials that cannot be resolved (an exec plugin, a bearer token,
+	// insecure-skip-tls-verify, missing certificate data) make health probing
+	// impossible for that context; the key still shows "down", but the
+	// reason belongs in the log instead of being silently swallowed.
+	onCredentialsUnavailable: (contextName, reason) =>
+		streamDeck.logger.warn(`context ${contextName} cannot be health-probed: ${reason}`),
 });
 const cycle = new CycleContextAction(service);
 const pin = new PinContextAction(service);
