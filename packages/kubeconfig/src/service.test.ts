@@ -1,8 +1,23 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createKubeconfigService, type KubeconfigService, type KubeconfigState } from "./service.js";
+
+// Health probing depends on credentials.ts (file access) and health.ts
+// (network access). Neither is exercised here: this file tests the service's
+// wiring of health status and polling lifecycle, not the probe itself, which
+// has its own dedicated tests in health.test.ts and credentials.test.ts.
+const probeMock = vi.hoisted(() => vi.fn<() => Promise<"ok" | "down">>(async () => "ok"));
+vi.mock("./health.js", () => ({ probe: probeMock }));
+
+const credentialsMock = vi.hoisted(() =>
+	vi.fn(async () => ({
+		ok: true as const,
+		value: { server: "https://example.invalid", ca: Buffer.alloc(0), cert: Buffer.alloc(0), key: Buffer.alloc(0) },
+	})),
+);
+vi.mock("./credentials.js", () => ({ resolveCredentials: credentialsMock }));
 
 const CONFIG = `apiVersion: v1
 kind: Config
@@ -141,5 +156,141 @@ describe("createKubeconfigService", () => {
 		expect(results[1]?.status).toBe("rejected");
 		expect(results[2]?.status).toBe("fulfilled");
 		expect(service.getState().current).toBe("agenon-vn-2");
+	});
+});
+
+describe("health status", () => {
+	let healthPath: string;
+
+	beforeEach(async () => {
+		probeMock.mockClear();
+		credentialsMock.mockClear();
+		const dir = await mkdtemp(join(tmpdir(), "kubeconfig-health-"));
+		healthPath = join(dir, "config");
+		await writeFile(healthPath, CONFIG, { mode: 0o600 });
+	});
+
+	it("reports unknown for a context that has no probe result yet", async () => {
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
+	});
+
+	it("reports unknown when there is no kubeconfig or no active context", () => {
+		const svc = createKubeconfigService({ path: join(tmpdir(), "kubeconfig-health-missing", "config") });
+		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
+	});
+
+	it("probes the active context on plugin start and reports ok once it resolves", async () => {
+		probeMock.mockResolvedValueOnce("ok");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		await waitFor(() => svc.getHealth() === "ok");
+		expect(credentialsMock).toHaveBeenCalledWith(healthPath, "agenon-vn-2");
+		svc.dispose();
+	});
+
+	it("reports down when the probe resolves down", async () => {
+		probeMock.mockResolvedValueOnce("down");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		await waitFor(() => svc.getHealth() === "down");
+		svc.dispose();
+	});
+
+	it("probes again on every context change, including an external one", async () => {
+		probeMock.mockResolvedValueOnce("ok");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "ok");
+
+		probeMock.mockResolvedValueOnce("down");
+		await writeFile(healthPath, CONFIG.replace("agenon-vn-2\ncontexts", "dev\ncontexts"));
+		await waitFor(() => svc.getState().current === "dev");
+		await waitFor(() => svc.getHealth() === "down");
+
+		expect(credentialsMock).toHaveBeenCalledWith(healthPath, "dev");
+		svc.dispose();
+	});
+
+	it("notifies onChange listeners through the existing change path when health resolves", async () => {
+		let resolveProbe: (value: "ok" | "down") => void = () => {};
+		probeMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					resolveProbe = resolve;
+				}),
+		);
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		const seen: KubeconfigState[] = [];
+		svc.onChange((state) => seen.push(state));
+		resolveProbe("ok");
+
+		await waitFor(() => seen.length > 0);
+		expect(svc.getHealth()).toBe("ok");
+		svc.dispose();
+	});
+
+	it("keeps the previous health while a new probe for the same context is in flight", async () => {
+		probeMock.mockResolvedValueOnce("ok");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "ok");
+
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		svc.keyVisible();
+
+		expect(svc.getHealth()).toBe("ok");
+		svc.dispose();
+	});
+
+	it("does not start a second probe for a context while one is already in flight", async () => {
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		const callsSoFar = probeMock.mock.calls.length;
+
+		svc.keyVisible();
+
+		expect(probeMock.mock.calls.length).toBe(callsSoFar);
+		svc.dispose();
+	});
+
+	it("starts the polling interval when a key appears and stops it once the last key disappears", async () => {
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20, healthIntervalMs: 20 });
+		await svc.refresh();
+		await waitFor(() => probeMock.mock.calls.length >= 1);
+
+		const release = svc.keyVisible();
+		await waitFor(() => probeMock.mock.calls.length >= 2);
+		const whileVisible = probeMock.mock.calls.length;
+
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(probeMock.mock.calls.length).toBeGreaterThan(whileVisible);
+
+		release();
+		const afterRelease = probeMock.mock.calls.length;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(probeMock.mock.calls.length).toBe(afterRelease);
+
+		svc.dispose();
+	});
+
+	it("does not probe when the kubeconfig has no active context", async () => {
+		await writeFile(healthPath, "apiVersion: v1\nkind: Config\ncontexts:\n  - name: dev\nclusters: []\nusers: []\n");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		expect(probeMock).not.toHaveBeenCalled();
+		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
 	});
 });

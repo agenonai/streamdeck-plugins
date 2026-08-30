@@ -9,6 +9,8 @@ function service(state: KubeconfigState): KubeconfigService {
 		setCurrent: async () => {},
 		onChange: () => () => {},
 		dispose: () => {},
+		getHealth: () => "unknown",
+		keyVisible: () => () => {},
 	};
 }
 
