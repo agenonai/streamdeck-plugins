@@ -233,6 +233,11 @@ describe("health status", () => {
 		);
 		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
 		await svc.refresh();
+		// resolveProbe is only assigned once probe() is actually reached, which
+		// is several microtasks after refresh() returns: resolving on faith
+		// right after the await makes the test depend on how many hops the
+		// credentials step happens to take.
+		await waitFor(() => probeMock.mock.calls.length >= 1);
 
 		const seen: KubeconfigState[] = [];
 		svc.onChange((state) => seen.push(state));
@@ -355,6 +360,65 @@ describe("health status", () => {
 		await new Promise((resolve) => setTimeout(resolve, 60));
 
 		expect(reasons).toEqual([["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"]]);
+		svc.dispose();
+	});
+
+	// A context name alone is not enough to dedupe on: a context reconfigured
+	// in place (exec plugin swapped for a bearer token, say) fails for a new
+	// reason under the same name, and an operator reading the log has to be
+	// told the current reason rather than the first one ever seen.
+	it("surfaces a second, different credential failure reason for the same context", async () => {
+		credentialsMock.mockResolvedValueOnce({
+			ok: false,
+			reason: "user prod-user uses an exec plugin, which is not supported",
+		});
+		const reasons: Array<[string, string]> = [];
+		const svc = createKubeconfigService({
+			path: healthPath,
+			debounceMs: 20,
+			onCredentialsUnavailable: (contextName, reason) => reasons.push([contextName, reason]),
+		});
+		await svc.refresh();
+		await waitFor(() => reasons.length === 1);
+
+		credentialsMock.mockResolvedValueOnce({
+			ok: false,
+			reason: "user prod-user does not use client certificate authentication, which is required",
+		});
+		svc.keyVisible();
+		await waitFor(() => reasons.length === 2);
+
+		expect(reasons).toEqual([
+			["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"],
+			["agenon-vn-2", "user prod-user does not use client certificate authentication, which is required"],
+		]);
+		svc.dispose();
+	});
+
+	// Reading credentials is a plain file read with no timeout of its own, so
+	// a kubeconfig on a stale network mount can hang indefinitely. The context
+	// is added to probesInFlight before that read, so without a deadline the
+	// dedupe guard would drop every later probe of it: the failure mode is not
+	// one slow probe, it is health for that context frozen until restart.
+	it("does not wedge probing for a context when reading its credentials never settles", async () => {
+		credentialsMock.mockImplementationOnce(() => new Promise(() => {}));
+		const svc = createKubeconfigService({
+			path: healthPath,
+			debounceMs: 20,
+			healthTimeoutMs: 30,
+		});
+		await svc.refresh();
+
+		// The stuck read hits its deadline and is treated as a failure to
+		// resolve credentials, which reports "down" like any other one.
+		await waitFor(() => svc.getHealth() === "down");
+
+		// The real assertion: a later probe of the same context still runs,
+		// which it cannot do if the stuck one still holds the in-flight slot.
+		probeMock.mockResolvedValueOnce("ok");
+		svc.keyVisible();
+		await waitFor(() => svc.getHealth() === "ok");
+
 		svc.dispose();
 	});
 });

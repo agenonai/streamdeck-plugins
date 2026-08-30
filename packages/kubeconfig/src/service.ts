@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import type { FSWatcher } from "node:fs";
-import { resolveCredentials } from "./credentials.js";
+import { resolveCredentials, type CredentialsResult } from "./credentials.js";
 import { probe } from "./health.js";
 import { parseKubeconfig, type KubeconfigState } from "./parse.js";
 import { resolveKubeconfigPath } from "./paths.js";
@@ -44,21 +44,48 @@ export type ServiceOptions = {
 	 */
 	onError?: (err: unknown) => void;
 	/**
-	 * Called at most once per context name when its credentials cannot be
-	 * resolved from the kubeconfig (an exec plugin, a bearer token,
-	 * insecure-skip-tls-verify, missing certificate data, and so on). The
-	 * context's health still reports "down" in this case; this callback
-	 * exists purely so the reason is not silently discarded, without
-	 * repeating it on every 30 second poll.
+	 * Called at most once per context name and reason when a context's
+	 * credentials cannot be resolved from the kubeconfig (an exec plugin, a
+	 * bearer token, insecure-skip-tls-verify, missing certificate data, and
+	 * so on). The context's health still reports "down" in this case; this
+	 * callback exists purely so the reason is not silently discarded,
+	 * without repeating it on every 30 second poll.
+	 *
+	 * Keying on the reason as well as the name matters when a context is
+	 * reconfigured in place: a context that first failed on an exec plugin
+	 * and later fails on a bearer token reports the second, now-current
+	 * reason instead of leaving the operator with the stale first one.
 	 */
 	onCredentialsUnavailable?: (contextName: string, reason: string) => void;
 	/** Overrides the 30 second health polling interval; for tests only. */
 	healthIntervalMs?: number;
-	/** Overrides the 5 second health probe timeout; for tests only. */
+	/**
+	 * Overrides the 5 second deadline applied to each health probe, both to
+	 * reading credentials out of the kubeconfig and to the request itself;
+	 * for tests only.
+	 */
 	healthTimeoutMs?: number;
 };
 
 const NOT_OK: KubeconfigState = { contexts: [], current: null, currentInvalid: false, ok: false };
+
+/**
+ * Resolves to `fallback` once `timeoutMs` has elapsed if `promise` has not
+ * settled by then, and treats a rejection as `fallback` too.
+ *
+ * The underlying work is not cancellable, so it keeps running; the point is
+ * only that the caller is never left awaiting it forever.
+ */
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+	return new Promise((resolve) => {
+		const deadline = setTimeout(() => resolve(fallback), timeoutMs);
+		const settle = (value: T): void => {
+			clearTimeout(deadline);
+			resolve(value);
+		};
+		void promise.then(settle, () => settle(fallback));
+	});
+}
 
 function sameState(a: KubeconfigState, b: KubeconfigState): boolean {
 	return (
@@ -96,8 +123,10 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 	// interval tick and a context change can all ask for a probe around the
 	// same time, and only one in-flight request per context is useful.
 	const probesInFlight = new Set<string>();
-	// Reported once per context name, ever, so an unsupported auth method or
-	// insecure-skip-tls-verify is logged once instead of every poll.
+	// Reported once per context name and reason, ever, so an unsupported auth
+	// method or insecure-skip-tls-verify is logged once instead of every poll,
+	// while a context that later starts failing for a different reason still
+	// gets that new reason reported.
 	const reportedCredentialFailures = new Set<string>();
 	let visibleKeyCount = 0;
 	let pollHandle: ReturnType<typeof setInterval> | null = null;
@@ -112,6 +141,13 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 	 * Kicks a probe of the active context, unless one for that same context
 	 * is already running. Never awaited by a caller: probing must not block
 	 * a key press or a refresh.
+	 *
+	 * Both halves of the cycle are bounded by healthTimeoutMs: probe() has
+	 * its own wall-clock deadline, and resolving credentials is wrapped in
+	 * one here. Without that, a kubeconfig read that never settles (a stale
+	 * network mount, a file lock) would leave the context in probesInFlight
+	 * forever, and the dedupe guard would then silently drop every later
+	 * probe of it, freezing its health until the plugin restarts.
 	 */
 	function probeActive(): void {
 		if (!state.ok || state.current === null) {
@@ -124,14 +160,19 @@ export function createKubeconfigService(opts: ServiceOptions = {}): KubeconfigSe
 		probesInFlight.add(name);
 		void (async () => {
 			try {
-				const credentials = await resolveCredentials(path, name);
+				const credentials = await withDeadline<CredentialsResult>(
+					resolveCredentials(path, name),
+					healthTimeoutMs,
+					{ ok: false, reason: `reading credentials for ${name} timed out after ${healthTimeoutMs}ms` },
+				);
 				let result: HealthStatus;
 				if (credentials.ok) {
 					result = await probe(credentials.value, healthTimeoutMs);
 				} else {
 					result = "down";
-					if (!reportedCredentialFailures.has(name)) {
-						reportedCredentialFailures.add(name);
+					const failureKey = `${name}\n${credentials.reason}`;
+					if (!reportedCredentialFailures.has(failureKey)) {
+						reportedCredentialFailures.add(failureKey);
 						opts.onCredentialsUnavailable?.(name, credentials.reason);
 					}
 				}
