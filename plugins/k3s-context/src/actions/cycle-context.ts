@@ -4,8 +4,10 @@ import streamDeck, {
 	SingletonAction,
 	type KeyDownEvent,
 	type WillAppearEvent,
+	type WillDisappearEvent,
 } from "@elgato/streamdeck";
 import { nextContext } from "../context-cycle.js";
+import { withStatus } from "../status-line.js";
 
 export type CycleSettings = {
 	/** Context names to cycle through, in kubeconfig order. */
@@ -14,6 +16,10 @@ export type CycleSettings = {
 
 @action({ UUID: "ai.agenon.k3s-context.cycle" })
 export class CycleContextAction extends SingletonAction<CycleSettings> {
+	// Tracks the health-polling disposer per key instance id, so a key that
+	// disappears releases exactly the visibility it registered on appear.
+	private readonly visibility = new Map<string, () => void>();
+
 	constructor(private readonly service: KubeconfigService) {
 		super();
 	}
@@ -27,8 +33,19 @@ export class CycleContextAction extends SingletonAction<CycleSettings> {
 	}
 
 	override async onWillAppear(ev: WillAppearEvent<CycleSettings>): Promise<void> {
+		// Stream Deck resends onWillAppear for the same action id on device
+		// reconnect and profile switch, without an intervening onWillDisappear.
+		// Releasing any existing hold first keeps one hold per key, not one per
+		// appear, so a single later onWillDisappear does not leak the rest.
+		this.visibility.get(ev.action.id)?.();
+		this.visibility.set(ev.action.id, this.service.keyVisible());
 		const settings = await ev.action.getSettings<CycleSettings>();
 		await ev.action.setTitle(this.title(settings.contexts ?? []));
+	}
+
+	override async onWillDisappear(ev: WillDisappearEvent<CycleSettings>): Promise<void> {
+		this.visibility.get(ev.action.id)?.();
+		this.visibility.delete(ev.action.id);
 	}
 
 	override async onKeyDown(ev: KeyDownEvent<CycleSettings>): Promise<void> {
@@ -58,6 +75,9 @@ export class CycleContextAction extends SingletonAction<CycleSettings> {
 		if (cycle.length === 0) {
 			return "no contexts";
 		}
-		return state.current ?? "none";
+		if (state.current === null) {
+			return "none";
+		}
+		return withStatus(state.current, this.service.getHealth());
 	}
 }

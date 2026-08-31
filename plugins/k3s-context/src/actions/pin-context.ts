@@ -5,7 +5,9 @@ import streamDeck, {
 	type KeyAction,
 	type KeyDownEvent,
 	type WillAppearEvent,
+	type WillDisappearEvent,
 } from "@elgato/streamdeck";
+import { withStatus } from "../status-line.js";
 
 export type PinSettings = {
 	/** The single context this key switches to. */
@@ -14,6 +16,10 @@ export type PinSettings = {
 
 @action({ UUID: "ai.agenon.k3s-context.pin" })
 export class PinContextAction extends SingletonAction<PinSettings> {
+	// Tracks the health-polling disposer per key instance id, so a key that
+	// disappears releases exactly the visibility it registered on appear.
+	private readonly visibility = new Map<string, () => void>();
+
 	constructor(private readonly service: KubeconfigService) {
 		super();
 	}
@@ -27,8 +33,19 @@ export class PinContextAction extends SingletonAction<PinSettings> {
 	}
 
 	override async onWillAppear(ev: WillAppearEvent<PinSettings>): Promise<void> {
+		// Stream Deck resends onWillAppear for the same action id on device
+		// reconnect and profile switch, without an intervening onWillDisappear.
+		// Releasing any existing hold first keeps one hold per key, not one per
+		// appear, so a single later onWillDisappear does not leak the rest.
+		this.visibility.get(ev.action.id)?.();
+		this.visibility.set(ev.action.id, this.service.keyVisible());
 		const settings = await ev.action.getSettings<PinSettings>();
 		await this.paint(ev.action as KeyAction<PinSettings>, settings.context);
+	}
+
+	override async onWillDisappear(ev: WillDisappearEvent<PinSettings>): Promise<void> {
+		this.visibility.get(ev.action.id)?.();
+		this.visibility.delete(ev.action.id);
 	}
 
 	override async onKeyDown(ev: KeyDownEvent<PinSettings>): Promise<void> {
@@ -59,7 +76,8 @@ export class PinContextAction extends SingletonAction<PinSettings> {
 			await target.setState(0);
 			return;
 		}
-		await target.setTitle(pinned);
-		await target.setState(state.ok && state.current === pinned ? 1 : 0);
+		const active = state.ok && state.current === pinned;
+		await target.setTitle(active ? withStatus(pinned, this.service.getHealth()) : pinned);
+		await target.setState(active ? 1 : 0);
 	}
 }

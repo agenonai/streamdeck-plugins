@@ -1,8 +1,27 @@
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createKubeconfigService, type KubeconfigService, type KubeconfigState } from "./service.js";
+
+// Health probing depends on credentials.ts (file access) and health.ts
+// (network access). Neither is exercised here: this file tests the service's
+// wiring of health status and polling lifecycle, not the probe itself, which
+// has its own dedicated tests in health.test.ts and credentials.test.ts.
+const probeMock = vi.hoisted(() => vi.fn<() => Promise<"ok" | "down">>(async () => "ok"));
+vi.mock("./health.js", () => ({ probe: probeMock }));
+
+type CredentialsResultForTest =
+	| { ok: true; value: { server: string; ca: Buffer; cert: Buffer; key: Buffer } }
+	| { ok: false; reason: string };
+
+const credentialsMock = vi.hoisted(() =>
+	vi.fn<() => Promise<CredentialsResultForTest>>(async () => ({
+		ok: true,
+		value: { server: "https://example.invalid", ca: Buffer.alloc(0), cert: Buffer.alloc(0), key: Buffer.alloc(0) },
+	})),
+);
+vi.mock("./credentials.js", () => ({ resolveCredentials: credentialsMock }));
 
 const CONFIG = `apiVersion: v1
 kind: Config
@@ -141,5 +160,265 @@ describe("createKubeconfigService", () => {
 		expect(results[1]?.status).toBe("rejected");
 		expect(results[2]?.status).toBe("fulfilled");
 		expect(service.getState().current).toBe("agenon-vn-2");
+	});
+});
+
+describe("health status", () => {
+	let healthPath: string;
+
+	beforeEach(async () => {
+		probeMock.mockClear();
+		credentialsMock.mockClear();
+		const dir = await mkdtemp(join(tmpdir(), "kubeconfig-health-"));
+		healthPath = join(dir, "config");
+		await writeFile(healthPath, CONFIG, { mode: 0o600 });
+	});
+
+	it("reports unknown for a context that has no probe result yet", async () => {
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
+	});
+
+	it("reports unknown when there is no kubeconfig or no active context", () => {
+		const svc = createKubeconfigService({ path: join(tmpdir(), "kubeconfig-health-missing", "config") });
+		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
+	});
+
+	it("probes the active context on plugin start and reports ok once it resolves", async () => {
+		probeMock.mockResolvedValueOnce("ok");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		await waitFor(() => svc.getHealth() === "ok");
+		expect(credentialsMock).toHaveBeenCalledWith(healthPath, "agenon-vn-2");
+		svc.dispose();
+	});
+
+	it("reports down when the probe resolves down", async () => {
+		probeMock.mockResolvedValueOnce("down");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		await waitFor(() => svc.getHealth() === "down");
+		svc.dispose();
+	});
+
+	it("probes again on every context change, including an external one", async () => {
+		probeMock.mockResolvedValueOnce("ok");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "ok");
+
+		probeMock.mockResolvedValueOnce("down");
+		await writeFile(healthPath, CONFIG.replace("agenon-vn-2\ncontexts", "dev\ncontexts"));
+		await waitFor(() => svc.getState().current === "dev");
+		await waitFor(() => svc.getHealth() === "down");
+
+		expect(credentialsMock).toHaveBeenCalledWith(healthPath, "dev");
+		svc.dispose();
+	});
+
+	it("notifies onChange listeners through the existing change path when health resolves", async () => {
+		let resolveProbe: (value: "ok" | "down") => void = () => {};
+		probeMock.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					resolveProbe = resolve;
+				}),
+		);
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		// resolveProbe is only assigned once probe() is actually reached, which
+		// is several microtasks after refresh() returns: resolving on faith
+		// right after the await makes the test depend on how many hops the
+		// credentials step happens to take.
+		await waitFor(() => probeMock.mock.calls.length >= 1);
+
+		const seen: KubeconfigState[] = [];
+		svc.onChange((state) => seen.push(state));
+		resolveProbe("ok");
+
+		await waitFor(() => seen.length > 0);
+		expect(svc.getHealth()).toBe("ok");
+		svc.dispose();
+	});
+
+	it("keeps the previous health while a new probe for the same context is in flight", async () => {
+		probeMock.mockResolvedValueOnce("ok");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "ok");
+
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		svc.keyVisible();
+
+		expect(svc.getHealth()).toBe("ok");
+		svc.dispose();
+	});
+
+	// Regression note: measuring probeMock.mock.calls.length synchronously
+	// right after svc.refresh() is a trap. probeActive() adds to
+	// probesInFlight synchronously, but the mocked resolveCredentials()
+	// still needs a microtask to resolve before probe() itself is ever
+	// called, so a synchronous assertion here passes (0 === 0) whether or
+	// not the dedupe guard exists: neither path has reached probe() yet.
+	// Waiting for the first call to actually land is what makes this test
+	// capable of failing: without the guard, releasing keyVisible() while
+	// the first probe is genuinely in flight calls probe() a second time.
+	it("does not start a second probe for a context while one is already in flight", async () => {
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => probeMock.mock.calls.length >= 1);
+		const callsSoFar = probeMock.mock.calls.length;
+
+		svc.keyVisible();
+		await new Promise((resolve) => setTimeout(resolve, 40));
+
+		expect(probeMock.mock.calls.length).toBe(callsSoFar);
+		svc.dispose();
+	});
+
+	// Regression note: healthByContext must be keyed per context name, not a
+	// single shared slot. A then B then back to A is what actually exercises
+	// that: with a shared slot, B's resolved result would still be showing
+	// once the service is back on A, because a shared write would overwrite
+	// the one place A's own result was recorded.
+	it("keeps a distinct cached health per context: A, then B, then back to A shows A's own result", async () => {
+		probeMock.mockResolvedValueOnce("down"); // probe #1: agenon-vn-2 (initial current)
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "down");
+
+		probeMock.mockResolvedValueOnce("ok"); // probe #2: dev
+		await writeFile(healthPath, CONFIG.replace('agenon-vn-2\ncontexts', 'dev\ncontexts'));
+		await waitFor(() => svc.getState().current === "dev");
+		await waitFor(() => svc.getHealth() === "ok");
+
+		// probe #3, for the return to agenon-vn-2, is left pending so the
+		// assertion below observes the cache, not a fresh resolution.
+		probeMock.mockImplementationOnce(() => new Promise(() => {}));
+		await writeFile(healthPath, CONFIG);
+		await waitFor(() => svc.getState().current === "agenon-vn-2");
+
+		expect(svc.getHealth()).toBe("down");
+		svc.dispose();
+	});
+
+	it("starts the polling interval when a key appears and stops it once the last key disappears", async () => {
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20, healthIntervalMs: 20 });
+		await svc.refresh();
+		await waitFor(() => probeMock.mock.calls.length >= 1);
+
+		const release = svc.keyVisible();
+		await waitFor(() => probeMock.mock.calls.length >= 2);
+		const whileVisible = probeMock.mock.calls.length;
+
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(probeMock.mock.calls.length).toBeGreaterThan(whileVisible);
+
+		release();
+		const afterRelease = probeMock.mock.calls.length;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(probeMock.mock.calls.length).toBe(afterRelease);
+
+		svc.dispose();
+	});
+
+	it("does not probe when the kubeconfig has no active context", async () => {
+		await writeFile(healthPath, "apiVersion: v1\nkind: Config\ncontexts:\n  - name: dev\nclusters: []\nusers: []\n");
+		const svc = createKubeconfigService({ path: healthPath, debounceMs: 20 });
+		await svc.refresh();
+
+		expect(probeMock).not.toHaveBeenCalled();
+		expect(svc.getHealth()).toBe("unknown");
+		svc.dispose();
+	});
+
+	it("reports down and surfaces the reason once when credentials cannot be resolved", async () => {
+		credentialsMock.mockResolvedValueOnce({ ok: false, reason: "user prod-user uses an exec plugin, which is not supported" });
+		const reasons: Array<[string, string]> = [];
+		const svc = createKubeconfigService({
+			path: healthPath,
+			debounceMs: 20,
+			healthIntervalMs: 20,
+			onCredentialsUnavailable: (contextName, reason) => reasons.push([contextName, reason]),
+		});
+		await svc.refresh();
+		await waitFor(() => svc.getHealth() === "down");
+		expect(probeMock).not.toHaveBeenCalled();
+		expect(reasons).toEqual([["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"]]);
+
+		// The next poll fails the same way; the callback must not fire again.
+		credentialsMock.mockResolvedValueOnce({ ok: false, reason: "user prod-user uses an exec plugin, which is not supported" });
+		svc.keyVisible();
+		await new Promise((resolve) => setTimeout(resolve, 60));
+
+		expect(reasons).toEqual([["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"]]);
+		svc.dispose();
+	});
+
+	// A context name alone is not enough to dedupe on: a context reconfigured
+	// in place (exec plugin swapped for a bearer token, say) fails for a new
+	// reason under the same name, and an operator reading the log has to be
+	// told the current reason rather than the first one ever seen.
+	it("surfaces a second, different credential failure reason for the same context", async () => {
+		credentialsMock.mockResolvedValueOnce({
+			ok: false,
+			reason: "user prod-user uses an exec plugin, which is not supported",
+		});
+		const reasons: Array<[string, string]> = [];
+		const svc = createKubeconfigService({
+			path: healthPath,
+			debounceMs: 20,
+			onCredentialsUnavailable: (contextName, reason) => reasons.push([contextName, reason]),
+		});
+		await svc.refresh();
+		await waitFor(() => reasons.length === 1);
+
+		credentialsMock.mockResolvedValueOnce({
+			ok: false,
+			reason: "user prod-user does not use client certificate authentication, which is required",
+		});
+		svc.keyVisible();
+		await waitFor(() => reasons.length === 2);
+
+		expect(reasons).toEqual([
+			["agenon-vn-2", "user prod-user uses an exec plugin, which is not supported"],
+			["agenon-vn-2", "user prod-user does not use client certificate authentication, which is required"],
+		]);
+		svc.dispose();
+	});
+
+	// Reading credentials is a plain file read with no timeout of its own, so
+	// a kubeconfig on a stale network mount can hang indefinitely. The context
+	// is added to probesInFlight before that read, so without a deadline the
+	// dedupe guard would drop every later probe of it: the failure mode is not
+	// one slow probe, it is health for that context frozen until restart.
+	it("does not wedge probing for a context when reading its credentials never settles", async () => {
+		credentialsMock.mockImplementationOnce(() => new Promise(() => {}));
+		const svc = createKubeconfigService({
+			path: healthPath,
+			debounceMs: 20,
+			healthTimeoutMs: 30,
+		});
+		await svc.refresh();
+
+		// The stuck read hits its deadline and is treated as a failure to
+		// resolve credentials, which reports "down" like any other one.
+		await waitFor(() => svc.getHealth() === "down");
+
+		// The real assertion: a later probe of the same context still runs,
+		// which it cannot do if the stuck one still holds the in-flight slot.
+		probeMock.mockResolvedValueOnce("ok");
+		svc.keyVisible();
+		await waitFor(() => svc.getHealth() === "ok");
+
+		svc.dispose();
 	});
 });

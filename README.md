@@ -42,6 +42,29 @@ development mode with the Stream Deck app:
 pnpm --filter @agenon/streamdeck-k3s-context dev
 ```
 
+## Cluster health status
+
+Both k3s context actions show a second title line with the reachability of
+the active context's API server:
+
+- `ok`: the API server answered `GET /readyz` with a 200 response.
+- `down`: anything else, a refused connection, a timeout, a TLS failure, or a
+  non-200 response.
+- `...`: the first probe for that context has not completed yet.
+
+Only the active context is probed, over mutual TLS using the certificate and
+key already in the kubeconfig, with a 5 second timeout. A probe runs on
+plugin start, on every context change (including one made outside the
+plugin), when a key appears, and on a 30 second interval while at least one
+cycle or pin key is visible; the interval stops once none are. Switching
+context is never blocked by a probe: the key updates immediately and the
+status line catches up once the new probe resolves. Health is cached per
+context, so cycling back to a context that was already probed shows its last
+known status instead of flickering back to `...`.
+
+The `no kubeconfig`, `no contexts` and `pick context` messages are unchanged
+and never carry a status line.
+
 ## Adding a new plugin
 
 1. Copy `plugins/k3s-context` to a new directory under `plugins/`.
